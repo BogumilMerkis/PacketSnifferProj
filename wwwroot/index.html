@@ -1,0 +1,136 @@
+<!doctype html>
+<html ng-app="packetApp">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Packet Sniffer</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mini.css/3.0.1/mini-default.min.css">
+    <style>
+        body {
+            padding: 12px
+        }
+
+        .packet-table {
+            border-collapse: collapse;
+            width: 100%
+        }
+
+        th, td {
+            border: 1px solid #ddd;
+        }
+
+        th {
+            background: #f4f4f4
+        }
+
+        #controls {
+            margin-bottom: 12px
+        }
+
+        pre {
+            white-space: pre-wrap
+        }
+    </style>
+</head>
+<body ng-controller="MainCtrl as vm">
+    <h2>Packet Sniffer</h2>
+    <div class="col-sm-6">
+        <label>
+            Device:
+            <select ng-model="vm.selectedDevice" ng-options="d.index as (d.index + ': ' + (d.description || d.name)) for d in vm.devices"></select>
+        </label>
+        <label>Filter: <input ng-model="vm.filter" placeholder="TCP Port 80" /></label>
+    </div>
+    <div class="col-sm-6">
+        <button ng-click="vm.start()" ng-disabled="vm.capturing">Start</button>
+        <button ng-click="vm.stop()" ng-disabled="!vm.capturing">Stop</button>
+        <button ng-click="vm.clear()">Clear</button>
+    </div>
+
+    <table class="packet-table">
+        <thead>
+            <tr><td>{{vm.packets.length}}</td></tr>
+            <tr><th>Time</th><th>Src</th><th>Dst</th><th>Proto</th><th>Len</th></tr>
+        </thead>
+        <tbody>
+            <tr ng-repeat="p in vm.packets | limitTo:200">
+                <td>{{p.timestamp}}</td>
+                <td>{{p.src}}</td>
+                <td>{{p.dest}}</td>
+                <td>{{p.protocol}}</td>
+                <td>{{p.length}}</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
+
+    <script>
+    (function(){
+      var app = angular.module('packetApp', []);
+
+      app.controller('MainCtrl', ['$http', '$timeout', function($http, $timeout){
+        var vm = this;
+        vm.devices = [];
+        vm.packets = [];
+        vm.lastRaw = '';
+        vm.capturing = false;
+        vm.selectedDevice = null;
+        vm.filter = '';
+        var ws = null;
+
+        vm.loadDevices = function(){
+          $http.get('/devices').then(function(res){
+            vm.devices = res.data;
+            if(vm.devices.length) vm.selectedDevice = vm.devices[0].index;
+          });
+        };
+
+        vm.openWs = function(){
+          if(ws && ws.readyState===1) return;
+          ws = new WebSocket('ws://' + location.host + '/ws');
+          ws.onmessage = function(e){
+            try{
+              var obj = JSON.parse(e.data);
+              vm.lastRaw = e.data;
+              $timeout(function(){
+                vm.packets.unshift(obj);
+                if(vm.packets.length > 200) vm.packets.pop();
+              });
+            }catch(err){ console.error(err); }
+          };
+        };
+
+        vm.start = function(){
+          if(vm.selectedDevice==null) return alert('Select device');
+          $http.post('/start?devIndex=' + vm.selectedDevice + '&filter=' + encodeURIComponent(vm.filter || ''))
+            .then(function(){
+              vm.capturing = true;
+              vm.openWs();
+            }, function(){
+              alert('Failed to start capture');
+            });
+        };
+
+        vm.stop = function(){
+          $http.post('/stop').then(function(){
+            vm.capturing = false;
+          }, function(){
+            alert('Failed to stop');
+          });
+        };
+
+        vm.clear = function(){
+          vm.packets = [];
+          vm.lastRaw = '';
+        };
+
+        // init
+        vm.loadDevices();
+      }]);
+    })();
+    </script>
+
+</body>
+</html>

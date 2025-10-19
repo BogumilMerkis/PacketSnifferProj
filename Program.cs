@@ -13,6 +13,8 @@ var app = builder.Build();
 
 app.Urls.Clear();
 app.Urls.Add("http://localhost:5000");
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 var webSocketOptions = new WebSocketOptions()
 { 
@@ -71,7 +73,10 @@ app.MapGet("/devices", () =>
     return Results.Json(list);
 });
 
-app.MapGet("/start/{devIndex}", (int devIndex) =>
+
+// filters like so https://wiki.wireshark.org/CaptureFilters..
+
+app.MapPost("/start", (int devIndex, string? filter) =>
 {
     if (capturing) return Results.BadRequest(new { error = "Already capturing" });
 
@@ -84,6 +89,10 @@ app.MapGet("/start/{devIndex}", (int devIndex) =>
     try
     {
         device.Open(DeviceModes.Promiscuous, 1000);
+        if (!string.IsNullOrWhiteSpace(filter))
+        {
+            try { device.Filter = filter; } catch { /* ignore invalid filter */ }
+        }
     }
     catch(Exception ex) 
     {
@@ -121,6 +130,11 @@ app.MapGet("/start/{devIndex}", (int devIndex) =>
                     else if (ip.PayloadPacket is UdpPacket udp)
                         proto += $" (UDP {udp.SourcePort}->{udp.DestinationPort})";
                 }
+                // Non-IP payload (ARP, etc.)
+                if (eth.PayloadPacket != null)
+                {
+                    proto = eth.PayloadPacket.GetType().Name;
+                }
             }
 
             var info = new
@@ -142,5 +156,76 @@ app.MapGet("/start/{devIndex}", (int devIndex) =>
     device.StartCapture();
     return Results.Ok(new { status = "started", device = devIndex });
 });
+
+app.MapPost("/stop", () =>
+{
+    if (!capturing) return Results.BadRequest(new { error = "Not capturing" });
+    try
+    {
+        captureDevice?.StopCapture();
+        captureDevice?.Close();
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message);
+    }
+    capturing = false;
+    captureDevice = null;
+    return Results.Ok(new { status = "stopped" });
+});
+
+app.MapGet("/", async context =>
+{
+    var path = "";
+    if (app.Environment.IsProduction())
+    {
+        path = "C:\\Users\\Bogumil\\OneDrive - University of Huddersfield\\Year 4\\FYP\\PacketSniffer\\wwwroot\\index.html";
+    }
+    else
+    {
+        path = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "index.html");
+
+    }
+
+    context.Response.ContentType = "text/html; charset=utf-8";
+    var html = await System.IO.File.ReadAllTextAsync(path);
+    await context.Response.WriteAsync(html);
+});
+
+app.MapGet("/ws", async context =>
+{
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = 400;
+        return;
+    }
+    var socket = await context.WebSockets.AcceptWebSocketAsync();
+    var id = Guid.NewGuid().ToString();
+    webSockets[id] = socket;
+
+
+    var buffer = new byte[1024 * 4];
+    try
+    {
+        while (socket.State == WebSocketState.Open)
+        {
+            var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                break;
+            }
+            // ignore client messages for now
+        }
+    }
+    catch { }
+    finally
+    {
+        webSockets.TryRemove(id, out _);
+        try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None); } catch { }
+    }
+});
+
+
+app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
 
 app.Run();
