@@ -108,11 +108,34 @@ app.MapGet("/start/{devIndex}", (int devIndex) =>
 
             if (parsed is EthernetPacket eth)
             {
-                Console.WriteLine(eth.HeaderSegment);
+                var ip = eth.PayloadPacket as IPPacket;
+
+                if (ip != null)
+                {
+                    src = ip.SourceAddress.ToString();
+                    dest = ip.DestinationAddress.ToString();
+                    proto = ip.Protocol.ToString();
+
+                    if (ip.PayloadPacket is TcpPacket tcp)
+                        proto += $" (TCP {tcp.SourcePort}->{tcp.DestinationPort})";
+                    else if (ip.PayloadPacket is UdpPacket udp)
+                        proto += $" (UDP {udp.SourcePort}->{udp.DestinationPort})";
+                }
             }
+
+            var info = new
+            {
+                timestamp = time.ToString("o"),
+                length = len,
+                src,
+                dest,
+                protocol = proto
+            };
+            packetQueue.Enqueue(info);
         }
         catch (Exception ex)
         {
+            packetQueue.Enqueue(new { timestamp = DateTime.UtcNow.ToString("o"), error = ex.Message });
             Console.Error.WriteLine(ex.Message);
         }
     };
