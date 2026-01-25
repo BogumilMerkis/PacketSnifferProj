@@ -10,7 +10,6 @@ using SharpPcap.LibPcap;
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-
 app.Urls.Clear();
 app.Urls.Add("http://localhost:5000");
 app.UseDefaultFiles();
@@ -29,6 +28,27 @@ var capturing = false;
 var packetQueue = new ConcurrentQueue<object>();
 var webSockets = new ConcurrentDictionary<string, WebSocket>();
 var cts = new CancellationTokenSource();
+
+// Simple async authenticator
+app.Use(async (ctx, next) =>
+{
+    if (ctx.Request.Path.StartsWithSegments("/health"))
+    {
+        await next();
+        return;
+    }
+
+    if (!Auth.Validate(ctx))
+    {
+        ctx.Response.Headers["WWW-Authenticate"] = "Basic realms=\"PacketSniffer\"";
+        ctx.Response.StatusCode = 401;
+        await ctx.Response.WriteAsync("Unauthorized");
+        return;
+    }
+
+    await next();
+});
+
 
 _ = Task.Run(async () =>
 {
@@ -101,6 +121,7 @@ app.MapPost("/start", (int devIndex, string? filter) =>
 
     capturing = true;
     captureDevice = device as ICaptureDevice;
+    var flowAnalyzer = new FlowAnalyzer();
 
     device.OnPacketArrival += (sender, e) =>
     {
@@ -111,7 +132,7 @@ app.MapPost("/start", (int devIndex, string? filter) =>
             var len = packet.Data.Length;
 
             // Attempt to parse packet data
-            var parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
+            Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
 
             string? src = null, dest = null, proto = parsed.GetType().Name;
 
@@ -137,15 +158,36 @@ app.MapPost("/start", (int devIndex, string? filter) =>
                 }
             }
 
-            var info = new
+
+
+            // Format raw bytes for view.
+            var rawBytes = packet.Data;
+            string hexDump = BitConverter.ToString(rawBytes).Replace("-", " ");
+            var verdict = Helpers.ClassifyPacket(parsed);
+            var flowVerdict = flowAnalyzer.ProcessPacket(parsed);
+
+            var packetMsg = new
             {
+                type = "packet",
                 timestamp = time.ToString("o"),
                 length = len,
                 src,
                 dest,
-                protocol = proto
+                protocol = proto,
+                raw = packet.Data,
+                details = parsed.ToString(),
+                verdict = verdict.ToString()
             };
-            packetQueue.Enqueue(info);
+
+            var flowSnapshot = flowAnalyzer.GetLastFlowSnapshot(parsed);
+            if (flowSnapshot != null)
+            {
+                // only send when meaningful changes happen.
+                if(flowSnapshot.packetCount % 10 == 0)
+                    packetQueue.Enqueue(flowSnapshot);
+            }
+
+            packetQueue.Enqueue(packetMsg);
         }
         catch (Exception ex)
         {

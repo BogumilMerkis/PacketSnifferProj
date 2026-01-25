@@ -30,6 +30,26 @@
         pre {
             white-space: pre-wrap
         }
+
+        .text-red {
+            color: #b00020;
+        }
+
+        .text-orange {
+            color: #e67e22;
+        }
+
+        .tabs a {
+            cursor: pointer;
+        }
+
+        .tabs{
+            display:inline-flex;
+        }
+
+        nav.tabs a.active {
+            font-weight: bold;
+        }
     </style>
 </head>
 <body ng-controller="MainCtrl as vm">
@@ -46,90 +66,174 @@
         <button ng-click="vm.stop()" ng-disabled="!vm.capturing">Stop</button>
         <button ng-click="vm.clear()">Clear</button>
     </div>
+    <nav class="tabs">
+        <a href
+           ng-class="{active: vm.activeTab==='packets'}"
+           ng-click="vm.activeTab='packets'">
+            Packet Capture
+        </a>
+        <a href
+           ng-class="{active: vm.activeTab==='flows'}"
+           ng-click="vm.activeTab='flows'">
+            Flow Analyzer
+        </a>
+    </nav>
+    <div ng-show="vm.activeTab==='packets'">
+        <table class="packet-table">
+            <thead>
+                <tr><td>Packets: {{vm.packets.length}}</td></tr>
+                <tr><th>Time</th><th>Src</th><th>Dst</th><th>Proto</th><th>Len</th><th>Verdict</th></tr>
+            </thead>
+            <tbody>
+                <tr ng-repeat="p in vm.packets | limitTo:10000">
+                    <td>{{p.timestamp}}</td>
+                    <td>{{p.src}}</td>
+                    <td>{{p.dest}}</td>
+                    <td>{{p.protocol}}</td>
+                    <td>{{p.length}}</td>
+                    <td>{{p.verdict}}</td>
 
-    <table class="packet-table">
-        <thead>
-            <tr><td>{{vm.packets.length}}</td></tr>
-            <tr><th>Time</th><th>Src</th><th>Dst</th><th>Proto</th><th>Len</th></tr>
-        </thead>
-        <tbody>
-            <tr ng-repeat="p in vm.packets | limitTo:200">
-                <td>{{p.timestamp}}</td>
-                <td>{{p.src}}</td>
-                <td>{{p.dest}}</td>
-                <td>{{p.protocol}}</td>
-                <td>{{p.length}}</td>
-            </tr>
-        </tbody>
-    </table>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div ng-show="vm.activeTab==='flows'">
+
+        <table class="packet-table">
+            <thead>
+                <tr><td>Flows: {{vm.flows.length}}</td></tr>
+                <tr>
+                    <th>Source</th>
+                    <th>Destination</th>
+                    <th>Proto</th>
+                    <th>Packets</th>
+                    <th>Bytes</th>
+                    <th>Duration (s)</th>
+                    <th>SYN</th>
+                    <th>FIN</th>
+                    <th>RST</th>
+                    <th>Verdict</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr ng-repeat="f in vm.flows | orderBy:'-lastSeen'">
+                    <td>{{f.src}}</td>
+                    <td>{{f.dest}}</td>
+                    <td>{{f.protocol}}</td>
+                    <td>{{f.packetCount}}</td>
+                    <td>{{f.byteCount}}</td>
+                    <td>{{f.duration}}</td>
+                    <td>{{f.syn}}</td>
+                    <td>{{f.fin}}</td>
+                    <td>{{f.rst}}</td>
+                    <td>
+                        <strong ng-class="{
+                        'text-red': f.verdict==='Malicious',
+                        'text-orange': f.verdict==='Suspicious'
+                    }">
+                            {{f.verdict}}
+                        </strong>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+    </div>
 
     <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
     <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
 
     <script>
-    (function(){
-      var app = angular.module('packetApp', []);
+        (function () {
+            var app = angular.module('packetApp', []);
 
-      app.controller('MainCtrl', ['$http', '$timeout', function($http, $timeout){
-        var vm = this;
-        vm.devices = [];
-        vm.packets = [];
-        vm.lastRaw = '';
-        vm.capturing = false;
-        vm.selectedDevice = null;
-        vm.filter = '';
-        var ws = null;
+            app.controller('MainCtrl', ['$http', '$timeout', function ($http, $timeout) {
+                var vm = this;
+                vm.devices = [];
+                vm.packets = [];
+                vm.flows = [];
+                vm.lastRaw = '';
+                vm.capturing = false;
+                vm.selectedDevice = null;
+                vm.filter = '';
+                vm.activeTab = 'packets';
+                var ws = null;
 
-        vm.loadDevices = function(){
-          $http.get('/devices').then(function(res){
-            vm.devices = res.data;
-            if(vm.devices.length) vm.selectedDevice = vm.devices[0].index;
-          });
-        };
+                vm.loadDevices = function () {
+                    $http.get('/devices').then(function (res) {
+                        vm.devices = res.data;
+                        if (vm.devices.length) vm.selectedDevice = vm.devices[0].index;
+                    });
+                };
 
-        vm.openWs = function(){
-          if(ws && ws.readyState===1) return;
-          ws = new WebSocket('ws://' + location.host + '/ws');
-          ws.onmessage = function(e){
-            try{
-              var obj = JSON.parse(e.data);
-              vm.lastRaw = e.data;
-              $timeout(function(){
-                vm.packets.unshift(obj);
-                if(vm.packets.length > 200) vm.packets.pop();
-              });
-            }catch(err){ console.error(err); }
-          };
-        };
+                vm.openWs = function () {
+                    if (ws && ws.readyState === 1) return;
+                    ws = new WebSocket('ws://' + location.host + '/ws');
+                    ws.onmessage = function (e) {
+                        try {
+                            var obj = JSON.parse(e.data);
+                            vm.lastRaw = e.data;
+                            $timeout(function () {
+                                if (obj.type == 'flow') {
+                                    upsertFlow(obj);
+                                    return;
+                                }
 
-        vm.start = function(){
-          if(vm.selectedDevice==null) return alert('Select device');
-          $http.post('/start?devIndex=' + vm.selectedDevice + '&filter=' + encodeURIComponent(vm.filter || ''))
-            .then(function(){
-              vm.capturing = true;
-              vm.openWs();
-            }, function(){
-              alert('Failed to start capture');
-            });
-        };
+                                vm.packets.unshift(obj);
+                                if (vm.packets.length > 10000) vm.packets.pop();
+                            });
+                        } catch (err) { console.error(err); }
+                    };
+                };
 
-        vm.stop = function(){
-          $http.post('/stop').then(function(){
-            vm.capturing = false;
-          }, function(){
-            alert('Failed to stop');
-          });
-        };
+                vm.start = function () {
+                    if (vm.selectedDevice == null) return alert('Select device');
+                    $http.post('/start?devIndex=' + vm.selectedDevice + '&filter=' + encodeURIComponent(vm.filter || ''))
+                        .then(function () {
+                            vm.capturing = true;
+                            vm.openWs();
+                        }, function () {
+                            alert('Failed to start capture');
+                        });
+                };
 
-        vm.clear = function(){
-          vm.packets = [];
-          vm.lastRaw = '';
-        };
+                vm.stop = function () {
+                    $http.post('/stop').then(function () {
+                        vm.capturing = false;
+                    }, function () {
+                        alert('Failed to stop');
+                    });
+                };
 
-        // init
-        vm.loadDevices();
-      }]);
-    })();
+                vm.clear = function () {
+                    if (!confirm("Are you sure?\n\nThis will clear both the packet table and the flow table.")) {
+                        return;
+                    }
+                    vm.packets = [];
+                    vm.flows = [];
+                    vm.lastRaw = '';
+                };
+
+                // init
+                vm.loadDevices();
+
+                // Upsert helper to create new flows or update existing ones.
+                function upsertFlow(flow) {
+                    var key = flow.key;
+
+                    var existing = vm.flows.find(f => f.key === key);
+                    if (existing) {
+                        angular.extend(existing, flow);
+                    } else {
+                        vm.flows.unshift(flow);
+                        if (vm.flows.length > 5000)
+                            vm.flows.pop();
+                    }
+                }
+
+            }]);
+        })();
     </script>
 
 </body>
