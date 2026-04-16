@@ -12,24 +12,24 @@ using System.Security.Cryptography;
 using Microsoft.AspNetCore.Cryptography.KeyDerivation;
 
 
-public static string HashPassword(string password)
-{
-    byte[] salt = RandomNumberGenerator.GetBytes(16);
-    var hash = KeyDerivation.Pbkdf2(
-    password,
-    salt,
-    KeyDerivationPrf.HMACSHA256,
-    iterationCount: 100_000,
-    numBytesRequested: 32);
-
-
-    return Convert.ToBase64String(salt) + ":" +
-    Convert.ToBase64String(hash);
-}
-
 public static class Helpers
 {
-	public enum PacketVerdict
+    public static string HashPassword(string password)
+    {
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+        var hash = KeyDerivation.Pbkdf2(
+        password,
+        salt,
+        KeyDerivationPrf.HMACSHA256,
+        iterationCount: 100_000,
+        numBytesRequested: 32);
+
+
+        return Convert.ToBase64String(salt) + ":" +
+        Convert.ToBase64String(hash);
+    }
+
+    public enum PacketVerdict
 	{
 		Benign,
 		Suspicious,
@@ -62,11 +62,32 @@ public static class Helpers
 		{
 			if (ContainsExploitStrings(tcp.PayloadData))
 				score += 7;
+                
+            // Check for encrypted/compressed data on Port 80
+            if (tcp.SourcePort == 80 || tcp.DestinationPort == 80)
+            {
+                double entropy = CalculateShannonEntropy(tcp.PayloadData);
+                if (entropy > 7.5) // Max entropy is 8.0, 7.5+ usually means encrypted
+                {
+                    // Encrypted traffic on a plaintext port is highly suspicious
+                    score += 5; 
+                }
+            }
 		}
 		else if(udp != null && udp.PayloadData?.Length > 0)
 		{
             if (ContainsExploitStrings(udp.PayloadData))
                 score += 7;
+                
+            // Check for high entropy on DNS (Port 53) - possible DNS tunneling
+            if (udp.SourcePort == 53 || udp.DestinationPort == 53)
+            {
+                double entropy = CalculateShannonEntropy(udp.PayloadData);
+                if (entropy > 5.5) // DNS normally has lower entropy
+                {
+                    score += 4;
+                }
+            }
         }
 
 		return score switch
@@ -138,7 +159,8 @@ public static class Helpers
 		return false;
 	}
 
-	public static bool ContainsExploitStrings(byte[] payload)
+    // Very basic, no encryption detection, just looking for common strings used in exploits.
+    public static bool ContainsExploitStrings(byte[] payload)
 	{
 		if (payload == null || payload.Length == 0)
 			return false;
@@ -185,5 +207,26 @@ public static class Helpers
 		if ((flags & 0x20) != 0) sb.Append("URG ");
 
 		return sb.Length == 0 ? "NONE" : sb.ToString().Trim();
-	} 
+	}
+
+    // Calculates the Shannon entropy of the given byte array. Useful for detecting encrypted or compressed data.
+    public static double CalculateShannonEntropy(byte[] data)
+    {
+        if (data == null || data.Length == 0) return 0.0;
+
+        int[] frequencies = new int[256];
+        foreach (byte b in data)
+            frequencies[b]++;
+
+        double entropy = 0.0;
+        foreach (int freq in frequencies)
+        {
+            if (freq > 0)
+            {
+                double probability = (double)freq / data.Length;
+                entropy -= probability * Math.Log(probability, 2);
+            }
+        }
+        return entropy; // Value between 0 and 8. > 7.5 usually means encrypted/compressed.
+    }
 }

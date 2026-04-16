@@ -361,3 +361,36 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/Hyper_v5.1
+/.env
+/wwwroot/assets/data
+/wwwroot/assets/images
+/wwwroot/assets/js/pages
+/wwwroot/assets/js/ui
+/wwwroot/assets/css/app-modern-rtl.css
+/wwwroot/assets/css/app-modern.css
+/wwwroot/assets/css/icons.css
+/wwwroot/assets/fonts/Nunito-Bold.eot
+/wwwroot/assets/fonts/Nunito-Bold.svg
+/wwwroot/assets/fonts/Nunito-Bold.ttf
+/wwwroot/assets/fonts/Nunito-Bold.woff
+/wwwroot/assets/fonts/Nunito-Light.eot
+/wwwroot/assets/fonts/Nunito-Light.svg
+/wwwroot/assets/fonts/Nunito-Light.ttf
+/wwwroot/assets/fonts/Nunito-Light.woff
+/wwwroot/assets/fonts/Nunito-Light.woff2
+/wwwroot/assets/fonts/Nunito-Medium.eot
+/wwwroot/assets/fonts/Nunito-Medium.svg
+/wwwroot/assets/fonts/Nunito-Medium.ttf
+/wwwroot/assets/fonts/Nunito-Medium.woff
+/wwwroot/assets/fonts/Nunito-Medium.woff2
+/wwwroot/assets/fonts/Nunito-Regular.eot
+/wwwroot/assets/fonts/Nunito-Regular.svg
+/wwwroot/assets/fonts/Nunito-Regular.ttf
+/wwwroot/assets/fonts/Nunito-Regular.woff
+/wwwroot/assets/fonts/Nunito-SemiBold.eot
+/wwwroot/assets/fonts/Nunito-SemiBold.svg
+/wwwroot/assets/fonts/Nunito-SemiBold.ttf
+/wwwroot/assets/fonts/Nunito-SemiBold.woff
+/wwwroot/assets/js/app.js
+/wwwroot/assets/vendor

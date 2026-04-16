@@ -9,12 +9,15 @@ public class FlowSnapshot
 
 	public long packetCount { get; init; }
 	public long byteCount { get; init; }
+	public string raw { get; init; } = "";
 
-	public int syn { get; init; }
+    public int syn { get; init; }
 	public int fin { get; init; }
 	public int rst { get; init; }
 
-	public double duration { get; init; }
+	public double entropy { get; init; }
+
+    public double duration { get; init; }
 	public string verdict { get; init; } = "";
 	public long lastSeen { get; init; }
 }

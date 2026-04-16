@@ -8,5 +8,8 @@
 	<ItemGroup>
 		<PackageReference Include="SharpPcap" Version="6.3.1" />
 		<PackageReference Include="PacketDotNet" Version="1.4.8" />
+		<Content Update="wwwroot\**">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</Content>
 	</ItemGroup>
 </Project>

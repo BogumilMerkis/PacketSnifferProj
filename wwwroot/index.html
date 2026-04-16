@@ -3,238 +3,296 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Packet Sniffer</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/mini.css/3.0.1/mini-default.min.css">
+    <title>Packet Sniffer | Flow Analyzer</title>
+
+    <!-- HYPER THEME CSS: Adjust these paths to where you placed the Hyper assets in your wwwroot -->
+    <link href="/assets/css/icons.min.css" rel="stylesheet" type="text/css" />
+    <link href="/assets/css/app-modern.min.css" rel="stylesheet" type="text/css" id="app-style" />
+    <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+
+    <!-- Grid.js CSS -->
+    <link href="https://unpkg.com/gridjs/dist/theme/mermaid.min.css" rel="stylesheet" />
+
     <style>
         body {
-            padding: 12px
+            overflow: hidden;
         }
 
-        .packet-table {
-            border-collapse: collapse;
-            width: 100%
+        .content-page {
+            margin-left: 0 !important;
         }
 
-        th, td {
-            border: 1px solid #ddd;
+        .main-app-container {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 10px);
         }
 
-        th {
-            background: #f4f4f4
+        .grid-container {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            overflow: hidden;
+            margin-bottom: 0 !important;
         }
 
-        #controls {
-            margin-bottom: 12px
+        .card-header {
+            border-radius: calc(0.25rem - -2px);
         }
 
-        pre {
-            white-space: pre-wrap
+        .gridjs-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            /*border: none !important;*/
         }
 
-        .text-red {
-            color: #b00020;
+        .gridjs-wrapper {
+            flex-grow: 1;
+            overflow-y: auto;
+            /*border: none !important;*/
         }
 
-        .text-orange {
-            color: #e67e22;
+        .gridjs-head {
+            padding-top: 0 !important;
         }
 
-        .tabs a {
+        .gridjs-tr:hover {
             cursor: pointer;
+            background-color: rgba(114, 124, 245, 0.1);
         }
 
-        .tabs{
-            display:inline-flex;
+        .gridjs-tr-selected, .gridjs-tr-selected td.gridjs-td {
+            background-color: #e0f2fe !important; /* Light blue */
+            color: #313a46 !important; /* Dark text for readability */
         }
 
-        nav.tabs a.active {
+        /* Details Pane */
+        .details-pane {
+            flex-shrink: 0;
+            height: 35%;
+            min-height: 200px;
+            overflow-y: auto;
+            border-top: 4px solid #444;
+            background: #2a2a30; /* Darker  */
+            color: #0acf97;
+            padding: 15px;
+            font-family: Consolas, Monaco, monospace;
+        }
+
+            .details-pane pre {
+                white-space: pre-wrap;
+                font-size: 13px;
+                background: transparent;
+                border: none;
+                color: #d1d5db;
+                margin: 0;
+            }
+
+        .details-header {
             font-weight: bold;
+            color: #fff;
+            border-bottom: 1px solid #555;
+            padding-bottom: 8px;
+            margin-bottom: 12px;
+            font-size: 15px;
         }
+
+        /* Adjusting cards */
+        .card-body-flex {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+            padding: 0 !important;
+            min-height: 0;
+            border-radius: calc(0.25rem - 1px);
+            overflow: hidden;
+        }
+
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #ced4da transparent;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: #ced4da;
+            border-radius: 10px;
+        }
+
+            ::-webkit-scrollbar-thumb:hover {
+                background-color: #aab8c5;
+            }
+
+        details-pane {
+            scrollbar-color: #55545b #2a2a30;
+        }
+
+            details-pane::-webkit-scrollbar-track {
+                background: #2a2a30;
+            }
+
+            details-pane::-webkit-scrollbar-thumb {
+                background-color: #55545b;
+            }
+
+                details-pane::-webkit-scrollbar-thumb:hover {
+                    background-color: #727cf5; 
+                }
+        
+        .input-group > .select2-container {
+            flex: 1 1 auto;
+            width: 1% !important;
+        }
+        
+        .input-group > .select2-container .select2-selection--single {
+            height: 100%;
+            min-height: 38px; 
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+            border-color: #dee2e6; 
+            display: flex;
+            align-items: center;
+        }
+
+        .input-group > .select2-container .select2-selection__arrow {
+            top: 50%;
+            transform: translateY(-50%);
+        }
+
+        .select2-container--default.select2-container--open .select2-selection--single .select2-selection__arrow b {
+            border-color: transparent transparent #888 transparent !important;
+            border-width: 0 4px 5px 4px !important;
+        }
+
     </style>
 </head>
-<body ng-controller="MainCtrl as vm">
-    <h2>Packet Sniffer</h2>
-    <div class="col-sm-6">
-        <label>
-            Device:
-            <select ng-model="vm.selectedDevice" ng-options="d.index as (d.index + ': ' + (d.description || d.name)) for d in vm.devices"></select>
-        </label>
-        <label>Filter: <input ng-model="vm.filter" placeholder="TCP Port 80" /></label>
+<body class="loading" data-layout="topnav" data-layout-config='{"layoutBoxed":false,"darkMode":false}' ng-controller="MainCtrl as vm">
+
+    <!-- Main Layout -->
+    <div class="wrapper">
+        <div class="content-page">
+            <div class="content main-app-container pt-3">
+                <div class="container-fluid h-100 d-flex flex-column">
+
+                    <!-- Controls and Filters Row -->
+                    <div class="row pt-2 mb-2" style="flex-shrink: 0;">
+                        <div class="col-xl-12">
+                            <div class="card mb-2">
+                                <div class="card-body py-2">
+                                    <div class="row align-items-center">
+                                        <div class="col-sm-4">
+                                            <div class="input-group">
+                                                <span class="input-group-text bg-primary text-white"><i class="mdi mdi-ethernet"></i></span>
+                                                <select id="device-select" class="form-control" data-toggle="select2" ng-model="vm.selectedDevice" ng-options="d.index as (d.index + ': ' + (d.description || d.name)) for d in vm.devices"></select>
+                                            </div>
+                                        </div>
+                                        <div class="col-sm-3">
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="mdi mdi-filter"></i></span>
+                                                <input type="text" class="form-control" ng-model="vm.filter" placeholder="e.g. tcp port 80" />
+                                            </div>
+                                        </div>
+                                        <div class="col-sm-4">
+                                            <button type="button" class="btn btn-success me-1" ng-click="vm.start()" ng-disabled="vm.capturing"><i class="mdi mdi-play"></i> Start</button>
+                                            <button type="button" class="btn btn-danger me-1" ng-click="vm.stop()" ng-disabled="!vm.capturing"><i class="mdi mdi-stop"></i> Stop</button>
+                                            <button type="button" class="btn btn-secondary me-1" ng-click="vm.clear()"><i class="mdi mdi-delete-sweep"></i> Clear</button>
+                                            <a href="/download" class="btn btn-info me-1" target="_blank" ng-class="{'disabled': vm.capturing}"><i class="mdi mdi-download"></i> PCAP</a>
+                                            <div class="" style="display: flex; align-items: center; float: right; padding-top: 6px;">
+                                                <i class="mdi mdi-record text-success fs-4 me-1" ng-show="vm.capturing"></i>
+                                                <i class="mdi mdi-record text-danger fs-4 me-1" ng-show="!vm.capturing"></i>
+                                                <span class="fw-bold">{{vm.capturing ? 'Capturing...' : 'Idle'}}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Split View (Grid + Details) -->
+                    <!-- Mini Tabs using nav classes -->
+                    <div class="card-header bg-light" style="margin-bottom: 5px">
+                        <ul class="nav nav-pills nav-justified" style="max-width: 400px;">
+                            <li class="nav-item">
+                                <a href="#" class="nav-link rounded-3" ng-class="{active: vm.activeTab==='packets'}" ng-click="vm.switchTab('packets'); $event.preventDefault();">
+                                    <i class="mdi mdi-format-list-bulleted me-1"></i> Capture ({{vm.packets.length}})
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="#" class="nav-link rounded-3" ng-class="{active: vm.activeTab==='flows'}" ng-click="vm.switchTab('flows'); $event.preventDefault();">
+                                    <i class="mdi mdi-chart-timeline-variant me-1"></i> Flows ({{vm.flows.length}})
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="card-body card-body-flex">
+
+                        <!-- Grids-->
+                        <div style="flex-grow: 1; overflow:hidden;" class="position-relative">
+                            <div id="packet-grid" ng-show="vm.activeTab==='packets'" style="height:100%"></div>
+                            <div id="flow-grid" ng-show="vm.activeTab==='flows'" style="height:100%"></div>
+                        </div>
+
+                        <!-- Details Bottom Box -->
+                        <div class="details-pane shadow-lg position-relative"
+                             ng-show="(vm.activeTab === 'packets' && vm.selectedPacket) || (vm.activeTab === 'flows' && vm.selectedFlow)">
+
+                            <button type="button" class="btn-close btn-close-white position-absolute top-0 end-0 m-2"
+                                    ng-click="vm.selectedPacket = null; vm.selectedFlow = null;" aria-label="Close"></button>
+
+                            <div ng-if="vm.activeTab==='packets' && vm.selectedPacket">
+                                <div class="details-header"><i class="mdi mdi-magnify-scan"></i> Frame Details: {{vm.selectedPacket.protocol}} ({{vm.selectedPacket.length}} bytes on wire)</div>
+                                <pre>{{vm.formatDetails(vm.selectedPacket)}}</pre>
+                            </div>
+
+                            <div ng-if="vm.activeTab==='flows' && vm.selectedFlow">
+                                <div class="details-header"><i class="mdi mdi-swap-horizontal"></i> Flow Key: {{vm.selectedFlow.key}}</div>
+                                <pre>{{vm.formatDetails(vm.selectedFlow)}}</pre>
+                            </div>
+                        </div>
+                    </div> <!-- end card body -->
+                </div> <!-- end container -->
+            </div> <!-- end content -->
+        </div>
     </div>
-    <div class="col-sm-6">
-        <button ng-click="vm.start()" ng-disabled="vm.capturing">Start</button>
-        <button ng-click="vm.stop()" ng-disabled="!vm.capturing">Stop</button>
-        <button ng-click="vm.clear()">Clear</button>
-    </div>
-    <nav class="tabs">
-        <a href
-           ng-class="{active: vm.activeTab==='packets'}"
-           ng-click="vm.activeTab='packets'">
-            Packet Capture
-        </a>
-        <a href
-           ng-class="{active: vm.activeTab==='flows'}"
-           ng-click="vm.activeTab='flows'">
-            Flow Analyzer
-        </a>
-    </nav>
-    <div ng-show="vm.activeTab==='packets'">
-        <table class="packet-table">
-            <thead>
-                <tr><td>Packets: {{vm.packets.length}}</td></tr>
-                <tr><th>Time</th><th>Src</th><th>Dst</th><th>Proto</th><th>Len</th><th>Verdict</th></tr>
-            </thead>
-            <tbody>
-                <tr ng-repeat="p in vm.packets | limitTo:10000">
-                    <td>{{p.timestamp}}</td>
-                    <td>{{p.src}}</td>
-                    <td>{{p.dest}}</td>
-                    <td>{{p.protocol}}</td>
-                    <td>{{p.length}}</td>
-                    <td>{{p.verdict}}</td>
 
-                </tr>
-            </tbody>
-        </table>
-    </div>
-
-    <div ng-show="vm.activeTab==='flows'">
-
-        <table class="packet-table">
-            <thead>
-                <tr><td>Flows: {{vm.flows.length}}</td></tr>
-                <tr>
-                    <th>Source</th>
-                    <th>Destination</th>
-                    <th>Proto</th>
-                    <th>Packets</th>
-                    <th>Bytes</th>
-                    <th>Duration (s)</th>
-                    <th>SYN</th>
-                    <th>FIN</th>
-                    <th>RST</th>
-                    <th>Verdict</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr ng-repeat="f in vm.flows | orderBy:'-lastSeen'">
-                    <td>{{f.src}}</td>
-                    <td>{{f.dest}}</td>
-                    <td>{{f.protocol}}</td>
-                    <td>{{f.packetCount}}</td>
-                    <td>{{f.byteCount}}</td>
-                    <td>{{f.duration}}</td>
-                    <td>{{f.syn}}</td>
-                    <td>{{f.fin}}</td>
-                    <td>{{f.rst}}</td>
-                    <td>
-                        <strong ng-class="{
-                        'text-red': f.verdict==='Malicious',
-                        'text-orange': f.verdict==='Suspicious'
-                    }">
-                            {{f.verdict}}
-                        </strong>
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-
-    </div>
-
-    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <!-- Scripts -->
     <script src="https://ajax.googleapis.com/ajax/libs/angularjs/1.8.3/angular.min.js"></script>
+    <script src="https://unpkg.com/gridjs/dist/gridjs.umd.js"></script>
+
+    <!-- HYPER THEME JS -->
+    <script src="/assets/js/vendor.min.js"></script>
+
+    <!-- Select2 JS -->
+    <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
 
     <script>
-        (function () {
-            var app = angular.module('packetApp', []);
-
-            app.controller('MainCtrl', ['$http', '$timeout', function ($http, $timeout) {
-                var vm = this;
-                vm.devices = [];
-                vm.packets = [];
-                vm.flows = [];
-                vm.lastRaw = '';
-                vm.capturing = false;
-                vm.selectedDevice = null;
-                vm.filter = '';
-                vm.activeTab = 'packets';
-                var ws = null;
-
-                vm.loadDevices = function () {
-                    $http.get('/devices').then(function (res) {
-                        vm.devices = res.data;
-                        if (vm.devices.length) vm.selectedDevice = vm.devices[0].index;
-                    });
-                };
-
-                vm.openWs = function () {
-                    if (ws && ws.readyState === 1) return;
-                    ws = new WebSocket('ws://' + location.host + '/ws');
-                    ws.onmessage = function (e) {
-                        try {
-                            var obj = JSON.parse(e.data);
-                            vm.lastRaw = e.data;
-                            $timeout(function () {
-                                if (obj.type == 'flow') {
-                                    upsertFlow(obj);
-                                    return;
-                                }
-
-                                vm.packets.unshift(obj);
-                                if (vm.packets.length > 10000) vm.packets.pop();
-                            });
-                        } catch (err) { console.error(err); }
-                    };
-                };
-
-                vm.start = function () {
-                    if (vm.selectedDevice == null) return alert('Select device');
-                    $http.post('/start?devIndex=' + vm.selectedDevice + '&filter=' + encodeURIComponent(vm.filter || ''))
-                        .then(function () {
-                            vm.capturing = true;
-                            vm.openWs();
-                        }, function () {
-                            alert('Failed to start capture');
-                        });
-                };
-
-                vm.stop = function () {
-                    $http.post('/stop').then(function () {
-                        vm.capturing = false;
-                    }, function () {
-                        alert('Failed to stop');
-                    });
-                };
-
-                vm.clear = function () {
-                    if (!confirm("Are you sure?\n\nThis will clear both the packet table and the flow table.")) {
-                        return;
-                    }
-                    vm.packets = [];
-                    vm.flows = [];
-                    vm.lastRaw = '';
-                };
-
-                // init
-                vm.loadDevices();
-
-                // Upsert helper to create new flows or update existing ones.
-                function upsertFlow(flow) {
-                    var key = flow.key;
-
-                    var existing = vm.flows.find(f => f.key === key);
-                    if (existing) {
-                        angular.extend(existing, flow);
-                    } else {
-                        vm.flows.unshift(flow);
-                        if (vm.flows.length > 5000)
-                            vm.flows.pop();
-                    }
-                }
-
-            }]);
-        })();
+        window.defaultConfig = {
+            theme: "light",
+            nav: "topnav",
+            layout: { mode: "fluid", position: "fixed" },
+            topbar: { color: "dark" },
+            menu: { color: "light" },
+            sidenav: { size: "default" }
+        };
+        window.config = JSON.parse(JSON.stringify(window.defaultConfig));
     </script>
+
+    <script src="/assets/js/app.min.js"></script>
+
+    <!-- App Logic -->
+    <script src="/packet.js"></script>
 
 </body>
 </html>
