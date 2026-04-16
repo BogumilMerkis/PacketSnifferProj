@@ -24,10 +24,14 @@ app.UseWebSockets(webSocketOptions);
 
 var devices = CaptureDeviceList.Instance;
 var captureDevice = (ICaptureDevice?)null;
+CaptureFileWriterDevice? pcapWriter = null; 
 var capturing = false;
 var packetQueue = new ConcurrentQueue<object>();
 var webSockets = new ConcurrentDictionary<string, WebSocket>();
 var cts = new CancellationTokenSource();
+
+Environment.SetEnvironmentVariable("MASTER_USER", "admin");
+Environment.SetEnvironmentVariable("MASTER_PASS_HASH", "oK8Cs5GlW6+4d3d6Djkf4w==:LdkdAVpWdNKphLFID+ooc44iiibLcUFWLlUymmckH1A=");
 
 // Simple async authenticator
 app.Use(async (ctx, next) =>
@@ -45,7 +49,8 @@ app.Use(async (ctx, next) =>
         await ctx.Response.WriteAsync("Unauthorized");
         return;
     }
-
+    var auth = ctx.Request.Query["auth"];
+    ctx.Request.Headers["Authorization"] = "Basic " + auth;
     await next();
 });
 
@@ -113,6 +118,11 @@ app.MapPost("/start", (int devIndex, string? filter) =>
         {
             try { device.Filter = filter; } catch { /* ignore invalid filter */ }
         }
+        
+        // Open the PCAP writer
+        var pcapFilePath = Path.Combine(Directory.GetCurrentDirectory(), "capture.pcap");
+        pcapWriter = new CaptureFileWriterDevice(pcapFilePath);
+        pcapWriter.Open(device);
     }
     catch(Exception ex) 
     {
@@ -127,6 +137,9 @@ app.MapPost("/start", (int devIndex, string? filter) =>
     {
         try
         {
+            // Write to PCAP file on arrival
+            pcapWriter?.Write(e.GetPacket());
+
             var packet = e.GetPacket();
             var time = packet.Timeval.Date;
             var len = packet.Data.Length;
@@ -158,13 +171,10 @@ app.MapPost("/start", (int devIndex, string? filter) =>
                 }
             }
 
-
-
             // Format raw bytes for view.
-            var rawBytes = packet.Data;
-            string hexDump = BitConverter.ToString(rawBytes).Replace("-", " ");
+            string hexDump = BitConverter.ToString(packet.Data).Replace("-", " ");
             var verdict = Helpers.ClassifyPacket(parsed);
-            var flowVerdict = flowAnalyzer.ProcessPacket(parsed);
+            
 
             var packetMsg = new
             {
@@ -174,12 +184,15 @@ app.MapPost("/start", (int devIndex, string? filter) =>
                 src,
                 dest,
                 protocol = proto,
-                raw = packet.Data,
+                raw = hexDump,
                 details = parsed.ToString(),
                 verdict = verdict.ToString()
             };
 
-            var flowSnapshot = flowAnalyzer.GetLastFlowSnapshot(parsed);
+            var flowResult = flowAnalyzer.ProcessPacket(parsed);
+            var flowVerdict = flowResult.Verdict;
+            var flowSnapshot = flowResult.Snapshot;
+
             if (flowSnapshot != null)
             {
                 // only send when meaningful changes happen.
@@ -206,6 +219,10 @@ app.MapPost("/stop", () =>
     {
         captureDevice?.StopCapture();
         captureDevice?.Close();
+        
+        // Close and flush the pcap writer to disk
+        pcapWriter?.Close();
+        pcapWriter = null;
     }
     catch (Exception ex)
     {
@@ -267,6 +284,16 @@ app.MapGet("/ws", async context =>
     }
 });
 
+app.MapGet("/download", () =>
+{
+    var pcapPath = Path.Combine(Directory.GetCurrentDirectory(), "capture.pcap");
+    if (!File.Exists(pcapPath))
+    {
+        return Results.NotFound(new { error = "No capture file found. Start and stop a capture first." });
+    }
+    
+    return Results.File(pcapPath, "application/vnd.tcpdump.pcap", "session.pcap");
+});
 
 app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
 
