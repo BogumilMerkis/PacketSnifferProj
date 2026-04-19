@@ -295,6 +295,92 @@ app.MapGet("/download", () =>
     return Results.File(pcapPath, "application/vnd.tcpdump.pcap", "session.pcap");
 });
 
+app.MapPost("/upload", async (HttpRequest req) =>
+{
+    if (!req.HasFormContentType || req.Form.Files.Count == 0)
+        return Results.BadRequest(new { error = "No file uploaded." });
+
+    var file = req.Form.Files[0];
+    var tempFile = Path.GetTempFileName();
+
+    await using (var stream = new FileStream(tempFile, FileMode.Create))
+    {
+        await file.CopyToAsync(stream);
+    }
+
+    // Process the PCAP on a background thread to prevent blocking the HTTP response
+    _ = Task.Run(() =>
+    {
+        try
+        {
+            using var pcapDevice = new CaptureFileReaderDevice(tempFile);
+            pcapDevice.Open();
+            var offlineAnalyzer = new FlowAnalyzer();
+
+            pcapDevice.OnPacketArrival += (sender, e) =>
+            {
+                var packet = e.GetPacket();
+                var time = packet.Timeval.Date;
+                var len = packet.Data.Length;
+
+                Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
+                string? src = null, dest = null, proto = parsed.GetType().Name;
+
+                if (parsed is EthernetPacket eth)
+                {
+                    if (eth.PayloadPacket is IPPacket ip)
+                    {
+                        src = ip.SourceAddress.ToString();
+                        dest = ip.DestinationAddress.ToString();
+                        proto = ip.Protocol.ToString();
+                        if (ip.PayloadPacket is TcpPacket tcp) proto += $" (TCP {tcp.SourcePort}->{tcp.DestinationPort})";
+                        else if (ip.PayloadPacket is UdpPacket udp) proto += $" (UDP {udp.SourcePort}->{udp.DestinationPort})";
+                    }
+                    else if (eth.PayloadPacket != null)
+                    {
+                        proto = eth.PayloadPacket.GetType().Name;
+                    }
+                }
+
+                var verdict = Helpers.ClassifyPacket(parsed);
+
+                var packetMsg = new
+                {
+                    type = "packet",
+                    timestamp = time.ToString("o"),
+                    length = len,
+                    src,
+                    dest,
+                    protocol = proto,
+                    raw = packet.Data,
+                    details = parsed.ToString(),
+                    verdict = verdict.ToString()
+                };
+
+                var flowResult = offlineAnalyzer.ProcessPacket(parsed);
+                if (flowResult.Snapshot != null && flowResult.Snapshot.packetCount % 10 == 0)
+                    packetQueue.Enqueue(flowResult.Snapshot);
+
+                packetQueue.Enqueue(packetMsg);
+
+                // Slight delay keeps a 1GB file from instantly crashing the WebSocket buffer
+                // For extremely large PCAPs, you might want to adjust this.
+                Thread.Sleep(1);
+            };
+
+            pcapDevice.Capture();
+            pcapDevice.Close();
+            File.Delete(tempFile);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Upload PCAP Error: " + ex.Message);
+        }
+    });
+
+    return Results.Ok(new { status = "processing_started" });
+});
+
 app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
 
 app.Run();

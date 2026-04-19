@@ -167,6 +167,29 @@
             return JSON.stringify(cleanObj, null, 2);
         };
 
+        vm.triggerUpload = function () {
+            $('#pcapUploadBtn').click();
+        };
+
+        vm.handleUpload = function (files) {
+            if (!files || files.length === 0) return;
+
+            var formData = new FormData();
+            formData.append('file', files[0]);
+
+            $http.post('/upload', formData, {
+                transformRequest: angular.identity,
+                headers: { 'Content-Type': undefined } // Forces browser to set boundary automatically
+            }).then(function () {
+                vm.openWs(); // ensure websocket open
+            }, function (err) {
+                alert('Upload failed: ' + (err.data.error || err.statusText));
+            });
+
+            // Reset the input
+            $('#pcapUploadBtn').val('');
+        };
+
         vm.loadDevices();
     }]);
 })();
