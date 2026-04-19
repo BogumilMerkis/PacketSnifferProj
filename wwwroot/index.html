@@ -206,6 +206,10 @@
                                             <button type="button" class="btn btn-success me-1" ng-click="vm.start()" ng-disabled="vm.capturing"><i class="mdi mdi-play"></i> Start</button>
                                             <button type="button" class="btn btn-danger me-1" ng-click="vm.stop()" ng-disabled="!vm.capturing"><i class="mdi mdi-stop"></i> Stop</button>
                                             <button type="button" class="btn btn-secondary me-1" ng-click="vm.clear()"><i class="mdi mdi-delete-sweep"></i> Clear</button>
+
+                                            <button type="button" class="btn btn-warning me-1" ng-click="vm.triggerUpload()"><i class="mdi mdi-upload"></i> Upload</button>
+                                            <input type="file" id="pcapUploadBtn" accept=".pcap,.pcapng,.cap" style="display: none;" onchange="angular.element(this).scope().vm.handleUpload(this.files)" />
+
                                             <a href="/download" class="btn btn-info me-1" target="_blank" ng-class="{'disabled': vm.capturing}"><i class="mdi mdi-download"></i> PCAP</a>
                                             <div class="" style="display: flex; align-items: center; float: right; padding-top: 6px;">
                                                 <i class="mdi mdi-record text-success fs-4 me-1" ng-show="vm.capturing"></i>
