@@ -12,6 +12,7 @@ var app = builder.Build();
 
 app.Urls.Clear();
 app.Urls.Add("http://localhost:5000");
+//app.Urls.Add("http://0.0.0.0:5000");
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -374,7 +375,6 @@ app.MapPost("/upload", async (HttpRequest req) =>
                 packetQueue.Enqueue(packetMsg);
 
                 // Slight delay keeps a 1GB file from instantly crashing the WebSocket buffer
-                // For extremely large PCAPs, you might want to adjust this.
                 Thread.Sleep(1);
             };
 
