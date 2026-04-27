@@ -11,8 +11,8 @@ var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
 app.Urls.Clear();
-app.Urls.Add("http://localhost:5000");
-//app.Urls.Add("http://0.0.0.0:5000");
+//app.Urls.Add("http://localhost:5000");
+app.Urls.Add("http://0.0.0.0:5000");
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
@@ -246,15 +246,13 @@ app.MapPost("/stop", () =>
 
 app.MapGet("/", async context =>
 {
-    var path = "";
-    if (app.Environment.IsProduction())
-    {
-        path = "C:\\Users\\Bogumil\\OneDrive - University of Huddersfield\\Year 4\\FYP\\PacketSniffer\\wwwroot\\index.html";
-    }
-    else
-    {
-        path = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "index.html");
+    var path = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "index.html");
 
+    if (!File.Exists(path))
+    {
+        context.Response.StatusCode = 404;
+        await context.Response.WriteAsync("Error: index.html not found.");
+        return;
     }
 
     context.Response.ContentType = "text/html; charset=utf-8";

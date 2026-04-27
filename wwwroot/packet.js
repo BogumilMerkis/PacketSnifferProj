@@ -38,7 +38,7 @@
         }).render(document.getElementById("flow-grid"));
 
         packetGrid.on('rowClick', (...args) => {
-            const e = args[0]; // Native PointerEvent
+            const e = args[0]; 
             const rowData = args[1].cells;
 
             // Remove selected class from all rows in packet grid
@@ -52,7 +52,7 @@
         });
 
         flowGrid.on('rowClick', (...args) => {
-            const e = args[0]; // Native PointerEvent
+            const e = args[0];
             const rowData = args[1].cells;
 
             // Remove selected class from all rows in flow grid
