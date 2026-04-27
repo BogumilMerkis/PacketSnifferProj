@@ -26,13 +26,13 @@
         };
 
         const packetGrid = new gridjs.Grid({
-            columns: ["Time", "Src", "Dst", "Proto", "Len", { name: "Verdict", formatter: renderVerdict }],
+            columns: ["Time", "Src", "Dest", "Protocol", "Len", { name: "Verdict", formatter: renderVerdict }],
             data: [], sort: true, resizable: true,
             className: { table: 'table table-centered table-nowrap mb-0 table-hover' }
         }).render(document.getElementById("packet-grid"));
 
         const flowGrid = new gridjs.Grid({
-            columns: ["Source", "Destination", "Proto", "Packets", "Bytes", "Duration (s)", "SYN", "FIN", "RST", { name: "Verdict", formatter: renderVerdict }],
+            columns: ["Source", "Destination", "Protocol", "Packets", "Bytes", "Duration (s)", "SYN", "FIN", "RST", { name: "Verdict", formatter: renderVerdict }],
             data: [], sort: true, resizable: true,
             className: { table: 'table table-centered table-nowrap mb-0 table-hover' }
         }).render(document.getElementById("flow-grid"));
@@ -75,16 +75,19 @@
             pendingGridUpdate = true;
             setTimeout(() => {
                 if (vm.activeTab === 'packets') {
-                    const packetData = vm.packets.map(p => [
+                    // Create a true copy of the data to prevent reference collision
+                    const packetData = [...vm.packets].map(p => [
                         p.timestamp, p.src, p.dest, p.protocol, p.length, p.verdict
                     ]);
+                    
                     packetGrid.updateConfig({ data: packetData }).forceRender();
                 } else {
-                    const flowData = vm.flows.map(f => [
+                    const flowData = [...vm.flows].map(f => [
                         f.src, f.dest, f.protocol, f.packetCount, f.byteCount,
                         parseFloat(f.duration).toFixed(2),
                         f.syn, f.fin, f.rst, f.verdict
                     ]);
+                    
                     flowGrid.updateConfig({ data: flowData }).forceRender();
                 }
                 pendingGridUpdate = false;
@@ -115,24 +118,46 @@
         };
 
         vm.openWs = function () {
-            if (ws && ws.readyState === 1) return;
+            // If already open or connecting, do nothing
+            if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+                return;
+            }
+
+            // Force close any existing broken/closed socket reference just to be safe
+            if (ws) {
+                try { ws.close(); } catch (e) { }
+            }
+
             ws = new WebSocket('ws://' + location.host + '/ws?auth=' + btoa("admin:password"));
+            
             ws.onmessage = function (e) {
                 try {
                     var obj = JSON.parse(e.data);
                     if (obj.type == 'flow') {
                         var existing = vm.flows.find(f => f.key === obj.key);
-                        if (existing) angular.extend(existing, obj);
-                        else {
+                        if (existing) {
+                            angular.extend(existing, obj);
+                        } else {
                             vm.flows.unshift(obj);
                             if (vm.flows.length > 2000) vm.flows.pop();
                         }
                     } else {
+                        // Prevent identical duplicate packets from being added (same timestamp & len)
+                        if (vm.packets.length > 0 && 
+                            vm.packets[0].timestamp === obj.timestamp && 
+                            vm.packets[0].length === obj.length) {
+                             return; 
+                        }
+
                         vm.packets.unshift(obj);
                         if (vm.packets.length > 5000) vm.packets.pop();
                     }
                     requestGridUpdate();
                 } catch (err) { console.error(err); }
+            };
+            
+            ws.onclose = function() {
+                ws = null;
             };
         };
 

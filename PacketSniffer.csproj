@@ -12,4 +12,11 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</Content>
 	</ItemGroup>
+	<ItemGroup>
+		<Compile Remove="PacketSniffer.Tests\**" />
+		<Content Remove="PacketSniffer.Tests\**" />
+		<None Remove="PacketSniffer.Tests\**" />
+	</ItemGroup>
 </Project>
+
+
