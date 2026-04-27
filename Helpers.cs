@@ -44,21 +44,105 @@ public static class Helpers
 
 		int score = 0;
 
-		var ip = packet.Extract<IPPacket>();
+        var eth = packet.Extract<EthernetPacket>();
+        var arp = packet.Extract<ArpPacket>();
+        var ip = packet.Extract<IPPacket>();
 		var tcp = packet.Extract<TcpPacket>();
 		var udp = packet.Extract<UdpPacket>();
 
-		// Sanity checks
-		if (ip != null && isMalformed(ip))
+        if(eth != null)
+        {
+            // Source MAC should never be broadcast address (Deliberately malformed frame)
+            if (eth.SourceHardwareAddress.ToString().Equals("FFFFFFFFFFFF", StringComparison.OrdinalIgnoreCase))
+            {
+                score += 10;
+            }
+        }
+
+        if (arp != null)
+        {
+            // Gratuitous ARP Check (Sender IP == Target IP)
+            // Widely used in ARP Poisoning to overwrite router ARP tables for MITM attacks.
+            if (arp.SenderProtocolAddress != null && arp.TargetProtocolAddress != null)
+            {
+                if (arp.SenderProtocolAddress.Equals(arp.TargetProtocolAddress))
+                {
+                    score += 4;
+                }
+            }
+        }
+
+        if (arp != null && eth != null)
+        {
+            // The physical MAC address that sent the frame MUST match the MAC address 
+            // inside the ARP protocol payload. If they differ, it is definitively a spoofed packet.
+            if (!eth.SourceHardwareAddress.Equals(arp.SenderHardwareAddress))
+            {
+                score += 8; // High indicator of active ARP Spoofing / MITM
+            }
+        }
+
+        if (ip != null)
+        {
+            var srcIpBytes = ip.SourceAddress.GetAddressBytes();
+
+            // Check if Source IP is 255.255.255.255 (Broadcast)
+            if (srcIpBytes[0] == 255 && srcIpBytes[1] == 255 && srcIpBytes[2] == 255 && srcIpBytes[3] == 255)
+            {
+                score += 5; // Impossible legitimate traffic
+            }
+
+            // Check if Source IP is in the Multicast Range (224.x.x.x - 239.x.x.x)
+            if (srcIpBytes[0] >= 224 && srcIpBytes[0] <= 239)
+            {
+                score += 5; // Multicast addresses can only be Destinations, never Sources
+            }
+        }
+
+        // Layer 3: Land Attack Check
+        if (ip != null && ip.SourceAddress.Equals(ip.DestinationAddress))
+        {
+            score += 10; // A machine should never send a public network packet to itself over the wire
+        }
+
+        var icmp = packet.Extract<IcmpV4Packet>();
+        if (icmp != null && icmp.PayloadData.Length > 64)
+        {
+            // A standard windows ping is only 32 bytes. Linux is 48. Anything over 64 
+            // carrying real data is highly suspicious of Ping Tunneling data exfiltration.
+            score += 6;
+        }
+
+        // Layer 4: Reflection Attack Port Loop
+        if (tcp != null && tcp.SourcePort == tcp.DestinationPort)
+        {
+            score += 6;
+        }
+        if (udp != null && udp.SourcePort == udp.DestinationPort)
+        {
+            score += 6;
+        }
+
+        // Sanity checks
+        if (ip != null && isMalformed(ip))
 			score += 5;
         if (tcp != null && isMalformedTcp(tcp))
             score += 5;
 
 		if (tcp != null && HasSuspiciousTcpFlags(tcp))
-			score += 3;
+			score += 5;
 
-		// Payload Inspection
-		if(tcp != null && tcp.PayloadData?.Length > 0)
+        // Check for IP fragmentation (Evading firewall detection)
+        if (packet.Extract<IPv4Packet>() is IPv4Packet ipv4)
+        {
+            if (ipv4.FragmentOffset > 0 || (int)ipv4.FragmentFlags != 0)
+            {
+                score += 3;  // High volume of fragmented packets is very suspicious
+            }
+        }
+
+        // Payload Inspection
+        if (tcp != null && tcp.PayloadData?.Length > 0)
 		{
 			if (ContainsExploitStrings(tcp.PayloadData))
 				score += 7;

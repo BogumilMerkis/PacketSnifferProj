@@ -57,7 +57,7 @@ public class FlowAnalyzer : IDisposable
         
         bool isPortScan = TrackAndDetectPortScan(ip.SourceAddress, dstPort);
         
-        // Pass 'key' so we can check ports against the entropy score
+        // Pass 'key' to check ports against the entropy score
         var verdict = ClassifyFlow(key, stats);
         
         if (isPortScan && verdict < FlowVerdict.Malicious)

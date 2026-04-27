@@ -24,6 +24,7 @@ app.UseWebSockets(webSocketOptions);
 
 var devices = CaptureDeviceList.Instance;
 var captureDevice = (ICaptureDevice?)null;
+PacketArrivalEventHandler? activeHandler = null;
 CaptureFileWriterDevice? pcapWriter = null; 
 var capturing = false;
 var packetQueue = new ConcurrentQueue<object>();
@@ -133,81 +134,90 @@ app.MapPost("/start", (int devIndex, string? filter) =>
     captureDevice = device as ICaptureDevice;
     var flowAnalyzer = new FlowAnalyzer();
 
-    device.OnPacketArrival += (sender, e) =>
+    if (activeHandler != null)
     {
-        try
-        {
-            // Write to PCAP file on arrival
-            pcapWriter?.Write(e.GetPacket());
+        device.OnPacketArrival -= activeHandler;
+    }
 
-            var packet = e.GetPacket();
-            var time = packet.Timeval.Date;
-            var len = packet.Data.Length;
-
-            // Attempt to parse packet data
-            Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
-
-            string? src = null, dest = null, proto = parsed.GetType().Name;
-
-            if (parsed is EthernetPacket eth)
+    activeHandler = (sender, e) =>
+    {
+            try
             {
-                var ip = eth.PayloadPacket as IPPacket;
+                // Write to PCAP file on arrival
+                pcapWriter?.Write(e.GetPacket());
 
-                if (ip != null)
+                var packet = e.GetPacket();
+                var time = packet.Timeval.Date;
+                var len = packet.Data.Length;
+
+                // Attempt to parse packet data
+                Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
+
+                string? src = null, dest = null, proto = null;
+
+                if (parsed is EthernetPacket eth)
                 {
-                    src = ip.SourceAddress.ToString();
-                    dest = ip.DestinationAddress.ToString();
-                    proto = ip.Protocol.ToString();
+                    var ip = eth.PayloadPacket as IPPacket;
 
-                    if (ip.PayloadPacket is TcpPacket tcp)
-                        proto += $" (TCP {tcp.SourcePort}->{tcp.DestinationPort})";
-                    else if (ip.PayloadPacket is UdpPacket udp)
-                        proto += $" (UDP {udp.SourcePort}->{udp.DestinationPort})";
-                }
-                // Non-IP payload (ARP, etc.)
-                if (eth.PayloadPacket != null)
-                {
-                    proto = eth.PayloadPacket.GetType().Name;
-                }
-            }
+                    if (ip != null)
+                    {
+                        src = ip.SourceAddress.ToString();
+                        dest = ip.DestinationAddress.ToString();
+                        proto = ip.Protocol.ToString();
 
-            // Format raw bytes for view.
-            string hexDump = BitConverter.ToString(packet.Data).Replace("-", " ");
-            var verdict = Helpers.ClassifyPacket(parsed);
+                        if (ip.PayloadPacket is TcpPacket tcp)
+                            proto = $"TCP ({tcp.SourcePort}->{tcp.DestinationPort})";
+                        else if (ip.PayloadPacket is UdpPacket udp)
+                            proto = $"UDP ({udp.SourcePort}->{udp.DestinationPort})";
+                        else if (ip.PayloadPacket is IcmpV4Packet icmp)
+                            proto = "ICMP";
+                    }
+                    else if (eth.PayloadPacket != null)
+                    {
+                        // Non-IP payload (ARP, LLDP, etc.)
+                        proto = eth.PayloadPacket.GetType().Name.Replace("Packet", "");
+                    }
+                }
+
+                // Format raw bytes for view.
+                string hexDump = BitConverter.ToString(packet.Data).Replace("-", " ");
+                var verdict = Helpers.ClassifyPacket(parsed);
             
 
-            var packetMsg = new
-            {
-                type = "packet",
-                timestamp = time.ToString("o"),
-                length = len,
-                src,
-                dest,
-                protocol = proto,
-                raw = hexDump,
-                details = parsed.ToString(),
-                verdict = verdict.ToString()
-            };
+                var packetMsg = new
+                {
+                    type = "packet",
+                    timestamp = time.ToLocalTime().ToString("o"),
+                    length = len,
+                    src,
+                    dest,
+                    protocol = proto,
+                    raw = hexDump,
+                    details = parsed.ToString(),
+                    verdict = verdict.ToString()
+                };
 
-            var flowResult = flowAnalyzer.ProcessPacket(parsed);
-            var flowVerdict = flowResult.Verdict;
-            var flowSnapshot = flowResult.Snapshot;
+                var flowResult = flowAnalyzer.ProcessPacket(parsed);
+                var flowVerdict = flowResult.Verdict;
+                var flowSnapshot = flowResult.Snapshot;
 
-            if (flowSnapshot != null)
-            {
-                // only send when meaningful changes happen.
-                if(flowSnapshot.packetCount % 10 == 0)
-                    packetQueue.Enqueue(flowSnapshot);
+                if (flowSnapshot != null)
+                {
+                    // only send when meaningful changes happen.
+                    if(flowSnapshot.packetCount % 10 == 0)
+                        packetQueue.Enqueue(flowSnapshot);
+                }
+                packetQueue.Enqueue(packetMsg);
             }
-
-            packetQueue.Enqueue(packetMsg);
-        }
-        catch (Exception ex)
-        {
-            packetQueue.Enqueue(new { timestamp = DateTime.UtcNow.ToString("o"), error = ex.Message });
-            Console.Error.WriteLine(ex.Message);
-        }
+            catch (Exception ex)
+            {
+                packetQueue.Enqueue(new { timestamp = DateTime.Now.ToString("o"), error = ex.Message });
+                Console.Error.WriteLine(ex.Message);
+            }
     };
+
+    device.OnPacketArrival += activeHandler; // Attach the new one safely
+
     device.StartCapture();
     return Results.Ok(new { status = "started", device = devIndex });
 });
