@@ -178,6 +178,9 @@
 </head>
 <body class="loading" data-layout="topnav" data-layout-config='{"layoutBoxed":false,"darkMode":false}' ng-controller="MainCtrl as vm">
 
+    <!-- Live alert toasts (top-right). Populated by packet.js for High/Critical alerts. -->
+    <div id="toast-container" class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1100;"></div>
+
     <!-- Main Layout -->
     <div class="wrapper">
         <div class="content-page">
@@ -190,7 +193,7 @@
                             <div class="card mb-2">
                                 <div class="card-body py-2">
                                     <div class="row align-items-center">
-                                        <div class="col-sm-4">
+                                        <div class="col-sm-2">
                                             <div class="input-group">
                                                 <span class="input-group-text bg-primary text-white"><i class="mdi mdi-ethernet"></i></span>
                                                 <select id="device-select" class="form-control" data-toggle="select2" ng-model="vm.selectedDevice" ng-options="d.index as (d.index + ': ' + (d.description || d.name)) for d in vm.devices"></select>
@@ -202,7 +205,7 @@
                                                 <input type="text" class="form-control" ng-model="vm.filter" placeholder="e.g. tcp port 80" />
                                             </div>
                                         </div>
-                                        <div class="col-sm-4">
+                                        <div class="col-sm-5">
                                             <button type="button" class="btn btn-success me-1" ng-click="vm.start()" ng-disabled="vm.capturing"><i class="mdi mdi-play"></i> Start</button>
                                             <button type="button" class="btn btn-danger me-1" ng-click="vm.stop()" ng-disabled="!vm.capturing"><i class="mdi mdi-stop"></i> Stop</button>
                                             <button type="button" class="btn btn-secondary me-1" ng-click="vm.clear()"><i class="mdi mdi-delete-sweep"></i> Clear</button>
@@ -211,6 +214,15 @@
                                             <input type="file" id="pcapUploadBtn" accept=".pcap,.pcapng,.cap" style="display: none;" onchange="angular.element(this).scope().vm.handleUpload(this.files)" />
 
                                             <a href="/download" class="btn btn-info me-1" target="_blank" ng-class="{'disabled': vm.capturing}"><i class="mdi mdi-download"></i> PCAP</a>
+
+                                            <button type="button" class="btn me-1"
+                                                    ng-class="vm.notifyEnabled ? 'btn-primary' : 'btn-outline-primary'"
+                                                    ng-click="vm.enableNotifications()"
+                                                    title="Desktop notifications, in-page toasts and a sound for High/Critical alerts">
+                                                <i class="mdi" ng-class="vm.notifyEnabled ? 'mdi-bell-ring' : 'mdi-bell-outline'"></i>
+                                                {{vm.notifyEnabled ? 'Alerts On' : 'Enable Alerts'}}
+                                            </button>
+
                                             <div class="" style="display: flex; align-items: center; float: right; padding-top: 6px;">
                                                 <i class="mdi mdi-record text-success fs-4 me-1" ng-show="vm.capturing"></i>
                                                 <i class="mdi mdi-record text-danger fs-4 me-1" ng-show="!vm.capturing"></i>
@@ -237,6 +249,11 @@
                                     <i class="mdi mdi-chart-timeline-variant me-1"></i> Flows ({{vm.flows.length}})
                                 </a>
                             </li>
+                            <li class="nav-item">
+                                <a href="#" class="nav-link rounded-3" ng-class="{active: vm.activeTab==='alerts'}" ng-click="vm.switchTab('alerts'); $event.preventDefault();">
+                                    <i class="mdi mdi-alert-outline me-1"></i> Alerts ({{vm.alerts.length}})
+                                </a>
+                            </li>
                         </ul>
                     </div>
 
@@ -246,23 +263,49 @@
                         <div style="flex-grow: 1; overflow:hidden;" class="position-relative">
                             <div id="packet-grid" ng-show="vm.activeTab==='packets'" style="height:100%"></div>
                             <div id="flow-grid" ng-show="vm.activeTab==='flows'" style="height:100%"></div>
+                            <div id="alert-grid" ng-show="vm.activeTab==='alerts'" style="height:100%"></div>
                         </div>
 
                         <!-- Details Bottom Box -->
                         <div class="details-pane shadow-lg position-relative"
-                             ng-show="(vm.activeTab === 'packets' && vm.selectedPacket) || (vm.activeTab === 'flows' && vm.selectedFlow)">
+                             ng-show="(vm.activeTab === 'packets' && (vm.selectedPacket || vm.packetError)) || (vm.activeTab === 'flows' && vm.selectedFlow) || (vm.activeTab === 'alerts' && vm.selectedAlert)">
 
                             <button type="button" class="btn-close btn-close-white position-absolute top-0 end-0 m-2"
-                                    ng-click="vm.selectedPacket = null; vm.selectedFlow = null;" aria-label="Close"></button>
+                                    ng-click="vm.selectedPacket = null; vm.selectedFlow = null; vm.selectedAlert = null; vm.packetError = null;" aria-label="Close"></button>
+
+                            <div ng-if="vm.activeTab==='packets' && vm.packetError">
+                                <div class="details-header"><i class="mdi mdi-alert-circle-outline"></i> Packet Detail</div>
+                                <pre>{{vm.packetError}}</pre>
+                            </div>
 
                             <div ng-if="vm.activeTab==='packets' && vm.selectedPacket">
                                 <div class="details-header"><i class="mdi mdi-magnify-scan"></i> Frame Details: {{vm.selectedPacket.protocol}} ({{vm.selectedPacket.length}} bytes on wire)</div>
-                                <pre>{{vm.formatDetails(vm.selectedPacket)}}</pre>
+                                <div ng-if="vm.selectedPacket.matches && vm.selectedPacket.matches.length">
+                                    <pre>Matches:
+<span ng-repeat="m in vm.selectedPacket.matches">  [{{m.sid}}] {{m.name}} ({{m.severity}}, {{m.category}}, {{m.technique}})
+</span></pre>
+                                </div>
+                                <pre>{{vm.selectedPacket.decode}}</pre>
+                                <pre>{{vm.selectedPacket.hex}}</pre>
                             </div>
 
                             <div ng-if="vm.activeTab==='flows' && vm.selectedFlow">
                                 <div class="details-header"><i class="mdi mdi-swap-horizontal"></i> Flow Key: {{vm.selectedFlow.key}}</div>
                                 <pre>{{vm.formatDetails(vm.selectedFlow)}}</pre>
+                            </div>
+
+                            <div ng-if="vm.activeTab==='alerts' && vm.selectedAlert">
+                                <div class="details-header"><i class="mdi mdi-alert-outline"></i> {{vm.selectedAlert.signature}} ({{vm.selectedAlert.severity}})</div>
+                                <pre>{{vm.selectedAlert.message}}
+
+SID:        {{vm.selectedAlert.sid}}
+Severity:   {{vm.selectedAlert.severity}}
+Category:   {{vm.selectedAlert.category}}
+Technique:  {{vm.selectedAlert.technique}}
+Protocol:   {{vm.selectedAlert.protocol}}
+Source:     {{vm.selectedAlert.src}}
+Dest:       {{vm.selectedAlert.dest}}
+Time:       {{vm.selectedAlert.timestamp}}</pre>
                             </div>
                         </div>
                     </div> <!-- end card body -->
