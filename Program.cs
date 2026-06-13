@@ -1,394 +1,247 @@
-using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
-using PacketDotNet;
+using PacketSniffer.Core;
+using PacketSniffer.Core.Logging;
+using PacketSniffer.Core.Notifications;
+using Serilog;
 using SharpPcap;
-using SharpPcap.LibPcap;
+
+// Bootstrap logger: captures failures during host construction, before the full
+// configuration is read. Replaced below by the configured logger.
+Log.Logger = new LoggerConfiguration().WriteTo.Console().CreateBootstrapLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Secrets live OUTSIDE the repo: appsettings.Secrets.json is gitignored. In production,
+// set MASTER_USER / MASTER_PASS_HASH (or Auth:User / Auth:PassHash) as environment variables.
+builder.Configuration.AddJsonFile("appsettings.Secrets.json", optional: true, reloadOnChange: true);
+
+// --- Structured logging (Serilog) -----------------------------------------
+// Console for operators + a daily-rolling application log file. The bespoke security
+// audit log (ECS/CEF) is separate and owned by SecurityEventLog.
+builder.Host.UseSerilog((ctx, cfg) => cfg
+    .ReadFrom.Configuration(ctx.Configuration)
+    .Enrich.FromLogContext()
+    .Enrich.WithProperty("Application", "PacketSniffer")
+    .WriteTo.Console()
+    .WriteTo.File(
+        path: Path.Combine("Logs", "app-.log"),
+        rollingInterval: Serilog.RollingInterval.Day,
+        retainedFileCountLimit: 14,
+        rollOnFileSizeLimit: true,
+        fileSizeLimitBytes: 50L * 1024 * 1024));
+
+// --- Configuration & DI ---------------------------------------------------
+var options = new SnifferOptions();
+builder.Configuration.GetSection("Sniffer").Bind(options);
+builder.Services.AddSingleton(options);
+builder.Services.AddSingleton<FlowTracker>();
+builder.Services.AddSingleton<PacketRingBuffer>();
+builder.Services.AddSingleton<AlertStore>();
+builder.Services.AddSingleton<BroadcastHub>();
+builder.Services.AddSingleton<CaptureSession>();
+
+// --- Bespoke security audit log -------------------------------------------
+var securityLogOptions = new SecurityLogOptions();
+builder.Configuration.GetSection("SecurityLog").Bind(securityLogOptions);
+builder.Services.AddSingleton(securityLogOptions);
+builder.Services.AddSingleton<SecurityEventLog>();
+
+// --- Alert notifications (pluggable channels + background dispatcher) ------
+var notifyOptions = new NotificationOptions();
+builder.Configuration.GetSection("Notifications").Bind(notifyOptions);
+builder.Services.AddSingleton(notifyOptions);
+builder.Services.AddSingleton<NotificationQueue>();
+builder.Services.AddHttpClient();
+
+if (notifyOptions.Webhook.Enabled)
+    builder.Services.AddSingleton<INotificationChannel>(sp =>
+        new WebhookNotificationChannel(notifyOptions.Webhook, sp.GetRequiredService<IHttpClientFactory>()));
+if (notifyOptions.Syslog.Enabled)
+    builder.Services.AddSingleton<INotificationChannel>(_ => new SyslogNotificationChannel(notifyOptions.Syslog));
+if (notifyOptions.Email.Enabled)
+    builder.Services.AddSingleton<INotificationChannel>(_ => new EmailNotificationChannel(notifyOptions.Email));
+
+builder.Services.AddHostedService<NotificationDispatcher>();
+
 var app = builder.Build();
 
 app.Urls.Clear();
-//app.Urls.Add("http://localhost:5000");
-app.Urls.Add("http://0.0.0.0:5000");
+app.Urls.Add(builder.Configuration["Urls"] ?? "http://0.0.0.0:5000");
+
+app.UseSerilogRequestLogging();
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
 
-var webSocketOptions = new WebSocketOptions()
-{ 
-    KeepAliveInterval = TimeSpan.FromSeconds(30)
-};
+// Resolve credentials from environment variables first (production), then the gitignored
+// secrets file (development). NOTHING is hardcoded here - if neither is set, auth fails closed.
+var authUser = Environment.GetEnvironmentVariable("MASTER_USER") ?? builder.Configuration["Auth:User"];
+var authHash = Environment.GetEnvironmentVariable("MASTER_PASS_HASH") ?? builder.Configuration["Auth:PassHash"];
+if (string.IsNullOrEmpty(authUser) || string.IsNullOrEmpty(authHash))
+    app.Logger.LogWarning(
+        "No auth credentials configured. Set Auth:User/Auth:PassHash in appsettings.Secrets.json " +
+        "or the MASTER_USER/MASTER_PASS_HASH environment variables. All requests will be rejected until then.");
+Environment.SetEnvironmentVariable("MASTER_USER", authUser);
+Environment.SetEnvironmentVariable("MASTER_PASS_HASH", authHash);
 
-app.UseWebSockets(webSocketOptions);
-
-var devices = CaptureDeviceList.Instance;
-var captureDevice = (ICaptureDevice?)null;
-PacketArrivalEventHandler? activeHandler = null;
-CaptureFileWriterDevice? pcapWriter = null; 
-var capturing = false;
-var packetQueue = new ConcurrentQueue<object>();
-var webSockets = new ConcurrentDictionary<string, WebSocket>();
-var cts = new CancellationTokenSource();
-
-Environment.SetEnvironmentVariable("MASTER_USER", "admin");
-Environment.SetEnvironmentVariable("MASTER_PASS_HASH", "oK8Cs5GlW6+4d3d6Djkf4w==:LdkdAVpWdNKphLFID+ooc44iiibLcUFWLlUymmckH1A=");
-
-// Simple async authenticator
+// --- Auth (HTTP Basic; ?auth= query is accepted for the WebSocket handshake) ----
 app.Use(async (ctx, next) =>
 {
-    if (ctx.Request.Path.StartsWithSegments("/health"))
+    if (ctx.Request.Path.StartsWithSegments("/health")) { await next(); return; }
+
+    // Prefer the browser's cached Basic-auth header. Only fall back to the ?auth= query
+    // param (used by the WebSocket handshake, which can't set headers) when none is present.
+    if (string.IsNullOrEmpty(ctx.Request.Headers["Authorization"]))
     {
-        await next();
-        return;
+        var auth = ctx.Request.Query["auth"];
+        if (!string.IsNullOrEmpty(auth))
+            ctx.Request.Headers["Authorization"] = "Basic " + auth;
     }
 
     if (!Auth.Validate(ctx))
     {
-        ctx.Response.Headers["WWW-Authenticate"] = "Basic realms=\"PacketSniffer\"";
+        ctx.Response.Headers["WWW-Authenticate"] = "Basic realm=\"PacketSniffer\"";
         ctx.Response.StatusCode = 401;
         await ctx.Response.WriteAsync("Unauthorized");
         return;
     }
-    var auth = ctx.Request.Query["auth"];
-    ctx.Request.Headers["Authorization"] = "Basic " + auth;
     await next();
 });
 
-
-_ = Task.Run(async () =>
-{
-    var token = cts.Token;
-
-    while (!token.IsCancellationRequested)
-    {
-        while(packetQueue.TryDequeue(out var item))
-        {
-            var json = JsonSerializer.Serialize(item);
-            var bytes = Encoding.UTF8.GetBytes(json);
-            var tasks = webSockets.Values.Select(async ws =>
-            {
-                try
-                {
-                    await ws.SendAsync(bytes, WebSocketMessageType.Text, true, token);
-                }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine(ex.Message);
-                }
-            });
-
-            try{
-                await Task.WhenAll(tasks);
-            }
-            catch {  }
-        }
-
-        await Task.Delay(50, token);
-    }
-});
+// --- Endpoints ------------------------------------------------------------
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.MapGet("/devices", () =>
 {
     var list = CaptureDeviceList.Instance.Select((d, i) => new
     {
-        Index = i,
-        Name = d.Name,
-        Description = d.Description
-    }).ToArray();
+        index = i,
+        name = d.Name,
+        description = d.Description
+    });
     return Results.Json(list);
 });
 
+app.MapGet("/status", (CaptureSession session) => Results.Json(session.Status()));
 
-// filters like so https://wiki.wireshark.org/CaptureFilters..
-
-app.MapPost("/start", (int devIndex, string? filter) =>
+app.MapPost("/start", (int devIndex, string? filter, CaptureSession session) =>
 {
-    if (capturing) return Results.BadRequest(new { error = "Already capturing" });
-
-    var devList = CaptureDeviceList.Instance;
-
-    if (devIndex < 0 || devIndex >= devList.Count) return Results.BadRequest(new { error = "Invalid index of device" });
-
-    var device = devList[devIndex];
-
     try
     {
-        device.Open(DeviceModes.Promiscuous, 1000);
-        if (!string.IsNullOrWhiteSpace(filter))
-        {
-            try { device.Filter = filter; } catch { /* ignore invalid filter */ }
-        }
-        
-        // Open the PCAP writer
-        var pcapFilePath = Path.Combine(Directory.GetCurrentDirectory(), "capture.pcap");
-        pcapWriter = new CaptureFileWriterDevice(pcapFilePath);
-        pcapWriter.Open(device);
+        var pcapPath = Path.Combine(Directory.GetCurrentDirectory(), "capture.pcap");
+        var msg = session.Start(devIndex, filter, pcapPath);
+        return Results.Ok(new { status = "started", device = devIndex, message = msg });
     }
-    catch(Exception ex) 
-    {
-        return Results.Problem(detail: ex.Message);
-    }
-
-    capturing = true;
-    captureDevice = device as ICaptureDevice;
-    var flowAnalyzer = new FlowAnalyzer();
-
-    if (activeHandler != null)
-    {
-        device.OnPacketArrival -= activeHandler;
-    }
-
-    activeHandler = (sender, e) =>
-    {
-            try
-            {
-                // Write to PCAP file on arrival
-                pcapWriter?.Write(e.GetPacket());
-
-                var packet = e.GetPacket();
-                var time = packet.Timeval.Date;
-                var len = packet.Data.Length;
-
-                // Attempt to parse packet data
-                Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
-
-                string? src = null, dest = null, proto = null;
-
-                if (parsed is EthernetPacket eth)
-                {
-                    var ip = eth.PayloadPacket as IPPacket;
-
-                    if (ip != null)
-                    {
-                        src = ip.SourceAddress.ToString();
-                        dest = ip.DestinationAddress.ToString();
-                        proto = ip.Protocol.ToString();
-
-                        if (ip.PayloadPacket is TcpPacket tcp)
-                            proto = $"TCP ({tcp.SourcePort}->{tcp.DestinationPort})";
-                        else if (ip.PayloadPacket is UdpPacket udp)
-                            proto = $"UDP ({udp.SourcePort}->{udp.DestinationPort})";
-                        else if (ip.PayloadPacket is IcmpV4Packet icmp)
-                            proto = "ICMP";
-                    }
-                    else if (eth.PayloadPacket != null)
-                    {
-                        // Non-IP payload (ARP, LLDP, etc.)
-                        proto = eth.PayloadPacket.GetType().Name.Replace("Packet", "");
-                    }
-                }
-
-                // Format raw bytes for view.
-                string hexDump = BitConverter.ToString(packet.Data).Replace("-", " ");
-                var verdict = Helpers.ClassifyPacket(parsed);
-            
-
-                var packetMsg = new
-                {
-                    type = "packet",
-                    timestamp = time.ToLocalTime().ToString("o"),
-                    length = len,
-                    src,
-                    dest,
-                    protocol = proto,
-                    raw = hexDump,
-                    details = parsed.ToString(),
-                    verdict = verdict.ToString()
-                };
-
-                var flowResult = flowAnalyzer.ProcessPacket(parsed);
-                var flowVerdict = flowResult.Verdict;
-                var flowSnapshot = flowResult.Snapshot;
-
-                if (flowSnapshot != null)
-                {
-                    // only send when meaningful changes happen.
-                    if(flowSnapshot.packetCount % 10 == 0)
-                        packetQueue.Enqueue(flowSnapshot);
-                }
-                packetQueue.Enqueue(packetMsg);
-            }
-            catch (Exception ex)
-            {
-                packetQueue.Enqueue(new { timestamp = DateTime.Now.ToString("o"), error = ex.Message });
-                Console.Error.WriteLine(ex.Message);
-            }
-    };
-
-    device.OnPacketArrival += activeHandler; // Attach the new one safely
-
-    device.StartCapture();
-    return Results.Ok(new { status = "started", device = devIndex });
+    catch (InvalidOperationException ex) { return Results.Conflict(new { error = ex.Message }); }
+    catch (ArgumentOutOfRangeException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (Exception ex) { return Results.Problem(detail: ex.Message); }
 });
 
-app.MapPost("/stop", () =>
+app.MapPost("/stop", async (CaptureSession session) =>
 {
-    if (!capturing) return Results.BadRequest(new { error = "Not capturing" });
-    try
-    {
-        captureDevice?.StopCapture();
-        captureDevice?.Close();
-        
-        // Close and flush the pcap writer to disk
-        pcapWriter?.Close();
-        pcapWriter = null;
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem(detail: ex.Message);
-    }
-    capturing = false;
-    captureDevice = null;
-    return Results.Ok(new { status = "stopped" });
+    try { await session.StopAsync(); return Results.Ok(new { status = "stopped" }); }
+    catch (InvalidOperationException ex) { return Results.BadRequest(new { error = ex.Message }); }
+    catch (Exception ex) { return Results.Problem(detail: ex.Message); }
 });
 
-app.MapGet("/", async context =>
+app.MapGet("/alerts", (AlertStore alerts) => Results.Json(alerts.Recent(500)));
+
+// Full decode + hex dump for ONE packet, fetched on demand when the user clicks a row.
+// This keeps the expensive human-readable rendering off the live broadcast path.
+app.MapGet("/packet/{id:long}", (long id, PacketRingBuffer ring) =>
 {
-    var path = Path.Combine(app.Environment.ContentRootPath, "wwwroot", "index.html");
+    var rec = ring.Get(id);
+    if (rec == null) return Results.NotFound(new { error = "Packet expired from buffer or not found." });
 
-    if (!File.Exists(path))
+    var parsed = PacketDecoder.TryParse(rec.LinkLayer, rec.Data);
+    return Results.Json(new
     {
-        context.Response.StatusCode = 404;
-        await context.Response.WriteAsync("Error: index.html not found.");
-        return;
-    }
-
-    context.Response.ContentType = "text/html; charset=utf-8";
-    var html = await System.IO.File.ReadAllTextAsync(path);
-    await context.Response.WriteAsync(html);
-});
-
-app.MapGet("/ws", async context =>
-{
-    if (!context.WebSockets.IsWebSocketRequest)
-    {
-        context.Response.StatusCode = 400;
-        return;
-    }
-    var socket = await context.WebSockets.AcceptWebSocketAsync();
-    var id = Guid.NewGuid().ToString();
-    webSockets[id] = socket;
-
-
-    var buffer = new byte[1024 * 4];
-    try
-    {
-        while (socket.State == WebSocketState.Open)
-        {
-            var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                break;
-            }
-            // ignore client messages for now
-        }
-    }
-    catch { }
-    finally
-    {
-        webSockets.TryRemove(id, out _);
-        try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None); } catch { }
-    }
+        id = rec.Id,
+        timestamp = rec.TimestampUtc.ToLocalTime().ToString("o"),
+        length = rec.Data.Length,
+        src = rec.Src,
+        dest = rec.Dest,
+        protocol = rec.Protocol,
+        verdict = rec.Verdict.ToString(),
+        flowKey = rec.FlowKey,
+        matches = rec.Matches.Select(m => new { m.Sid, m.Name, severity = m.Severity.ToString(), m.Category, m.Technique }),
+        decode = parsed?.ToString() ?? "<undecodable>",
+        hex = PacketDecoder.HexDump(rec.Data)
+    });
 });
 
 app.MapGet("/download", () =>
 {
     var pcapPath = Path.Combine(Directory.GetCurrentDirectory(), "capture.pcap");
-    if (!File.Exists(pcapPath))
-    {
-        return Results.NotFound(new { error = "No capture file found. Start and stop a capture first." });
-    }
-    
-    return Results.File(pcapPath, "application/vnd.tcpdump.pcap", "session.pcap");
+    return File.Exists(pcapPath)
+        ? Results.File(pcapPath, "application/vnd.tcpdump.pcap", "session.pcap")
+        : Results.NotFound(new { error = "No capture file found. Start and stop a capture first." });
 });
 
-app.MapPost("/upload", async (HttpRequest req) =>
+app.MapPost("/upload", async (HttpRequest req, CaptureSession session) =>
 {
     if (!req.HasFormContentType || req.Form.Files.Count == 0)
         return Results.BadRequest(new { error = "No file uploaded." });
 
     var file = req.Form.Files[0];
     var tempFile = Path.GetTempFileName();
-
     await using (var stream = new FileStream(tempFile, FileMode.Create))
-    {
         await file.CopyToAsync(stream);
-    }
 
-    // Process the PCAP on a background thread to prevent blocking the HTTP response
-    _ = Task.Run(() =>
+    // Replay through the same analysis pipeline on a background thread.
+    _ = Task.Run(async () =>
     {
-        try
-        {
-            using var pcapDevice = new CaptureFileReaderDevice(tempFile);
-            pcapDevice.Open();
-            var offlineAnalyzer = new FlowAnalyzer();
-
-            pcapDevice.OnPacketArrival += (sender, e) =>
-            {
-                var packet = e.GetPacket();
-                var time = packet.Timeval.Date;
-                var len = packet.Data.Length;
-
-                Packet? parsed = PacketDotNet.Packet.ParsePacket(packet.LinkLayerType, packet.Data);
-                string? src = null, dest = null, proto = parsed.GetType().Name;
-
-                if (parsed is EthernetPacket eth)
-                {
-                    if (eth.PayloadPacket is IPPacket ip)
-                    {
-                        src = ip.SourceAddress.ToString();
-                        dest = ip.DestinationAddress.ToString();
-                        proto = ip.Protocol.ToString();
-                        if (ip.PayloadPacket is TcpPacket tcp) proto += $" (TCP {tcp.SourcePort}->{tcp.DestinationPort})";
-                        else if (ip.PayloadPacket is UdpPacket udp) proto += $" (UDP {udp.SourcePort}->{udp.DestinationPort})";
-                    }
-                    else if (eth.PayloadPacket != null)
-                    {
-                        proto = eth.PayloadPacket.GetType().Name;
-                    }
-                }
-
-                var verdict = Helpers.ClassifyPacket(parsed);
-
-                var packetMsg = new
-                {
-                    type = "packet",
-                    timestamp = time.ToString("o"),
-                    length = len,
-                    src,
-                    dest,
-                    protocol = proto,
-                    raw = packet.Data,
-                    details = parsed.ToString(),
-                    verdict = verdict.ToString()
-                };
-
-                var flowResult = offlineAnalyzer.ProcessPacket(parsed);
-                if (flowResult.Snapshot != null && flowResult.Snapshot.packetCount % 10 == 0)
-                    packetQueue.Enqueue(flowResult.Snapshot);
-
-                packetQueue.Enqueue(packetMsg);
-
-                // Slight delay keeps a 1GB file from instantly crashing the WebSocket buffer
-                Thread.Sleep(1);
-            };
-
-            pcapDevice.Capture();
-            pcapDevice.Close();
-            File.Delete(tempFile);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine("Upload PCAP Error: " + ex.Message);
-        }
+        try { await session.ReplayFileAsync(tempFile); }
+        catch (Exception ex) { app.Logger.LogError(ex, "Upload replay error"); }
+        finally { try { File.Delete(tempFile); } catch { } }
     });
 
     return Results.Ok(new { status = "processing_started" });
 });
 
-app.Lifetime.ApplicationStopping.Register(() => cts.Cancel());
+app.MapGet("/ws", async (HttpContext context, BroadcastHub hub) =>
+{
+    if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; return; }
 
-app.Run();
+    var socket = await context.WebSockets.AcceptWebSocketAsync();
+    var id = Guid.NewGuid().ToString();
+    hub.Register(id, socket);
+
+    var buffer = new byte[4096];
+    try
+    {
+        while (socket.State == WebSocketState.Open)
+        {
+            var result = await socket.ReceiveAsync(buffer, CancellationToken.None);
+            if (result.MessageType == WebSocketMessageType.Close) break;
+        }
+    }
+    catch { /* client dropped */ }
+    finally
+    {
+        hub.Unregister(id);
+        try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "closing", CancellationToken.None); } catch { }
+    }
+});
+
+// Graceful teardown of the capture pipeline.
+app.Lifetime.ApplicationStopping.Register(() =>
+{
+    var session = app.Services.GetRequiredService<CaptureSession>();
+    session.DisposeAsync().AsTask().GetAwaiter().GetResult();
+});
+
+try
+{
+    // Touch the security log so a misconfiguration surfaces at startup, not on first alert.
+    _ = app.Services.GetRequiredService<SecurityEventLog>();
+    app.Run();
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Host terminated unexpectedly");
+}
+finally
+{
+    Log.CloseAndFlush();
+}
