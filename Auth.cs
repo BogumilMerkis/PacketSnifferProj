@@ -6,6 +6,18 @@ using System.Security.Cryptography;
 
 public static class Auth
 {
+    /// <summary>
+    /// Generates a PBKDF2 "salt:hash" string for the MASTER_PASS_HASH env var.
+    /// Run once to mint a credential; never hardcode plaintext passwords.
+    /// </summary>
+    public static string HashPassword(string password)
+    {
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+        byte[] hash = KeyDerivation.Pbkdf2(password, salt, KeyDerivationPrf.HMACSHA256,
+            iterationCount: 100_000, numBytesRequested: 32);
+        return Convert.ToBase64String(salt) + ":" + Convert.ToBase64String(hash);
+    }
+
     public static bool Validate(HttpContext ctx)
     {
         var auth = ctx.Request.Headers["Authorization"].FirstOrDefault();
