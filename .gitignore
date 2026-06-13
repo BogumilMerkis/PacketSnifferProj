@@ -363,6 +363,13 @@ MigrationBackup/
 FodyWeavers.xsd
 /Hyper_v5.1
 /.env
+
+# Local secrets (auth credentials) - never commit. Use appsettings.Secrets.json.example as a template.
+appsettings.Secrets.json
+
+# Submission archive (large binary artifact, not source)
+FYP_U2167185.zip
+
 /wwwroot/assets/data
 /wwwroot/assets/images
 /wwwroot/assets/js/pages
